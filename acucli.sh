@@ -101,7 +101,7 @@ ADD_CONFIG='{
 
 UPDATE_CONFIG=$(cat <<EOF
 {
-    "scan_speed": "slow",
+    "scan_speed": "slow", #sequential, slow, moderate, fast
     "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
     "default_scanning_profile_id": "$DEFAULT_SCANNING_PROFILE_ID"
 }
