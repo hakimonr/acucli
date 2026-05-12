@@ -10,6 +10,7 @@ usage() {
     echo "  --dfspid       Default scanning profile ID"
     echo "  --spid         Scan profile ID (defaults to --dfspid if not provided)"
     echo "  --scan-speed   Scan speed: sequential, slow, moderate, fast (default: slow)"
+    echo "  --max-scans    Max concurrent scans (default: 5)"
     echo "  --skip-scan    Skip scanning step"
     echo "  --delete-all   Delete all existing targets before adding new ones"
     echo "  --stop-all     Stop all running scans"
@@ -29,6 +30,7 @@ STOP_ALL=false
 RESUME_FAILED=false
 WAIT_COMPLETION=false
 SCAN_SPEED="slow"
+MAX_CONCURRENT_SCANS=5
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -54,6 +56,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --scan-speed)
             SCAN_SPEED="$2"
+            shift 2
+            ;;
+        --max-scans)
+            MAX_CONCURRENT_SCANS="$2"
             shift 2
             ;;
         --skip-scan)
@@ -152,7 +158,6 @@ configure_target() {
          -d "$UPDATE_CONFIG"
 }
 
-MAX_CONCURRENT_SCANS=${MAX_CONCURRENT_SCANS:-5}
 MAX_RETRIES=3
 RETRY_DELAY=5
 
