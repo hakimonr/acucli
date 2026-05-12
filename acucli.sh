@@ -9,6 +9,7 @@ usage() {
     echo "  --df           Domain file (CSV format)"
     echo "  --dfspid       Default scanning profile ID"
     echo "  --spid         Scan profile ID (defaults to --dfspid if not provided)"
+    echo "  --scan-speed   Scan speed: sequential, slow, moderate, fast (default: slow)"
     echo "  --skip-scan    Skip scanning step"
     echo "  --delete-all   Delete all existing targets before adding new ones"
     echo "  --stop-all     Stop all running scans"
@@ -27,6 +28,7 @@ DELETE_ALL=false
 STOP_ALL=false
 RESUME_FAILED=false
 WAIT_COMPLETION=false
+SCAN_SPEED="slow"
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -48,6 +50,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --spid)
             SCAN_PROFILE_ID="$2"
+            shift 2
+            ;;
+        --scan-speed)
+            SCAN_SPEED="$2"
             shift 2
             ;;
         --skip-scan)
@@ -101,7 +107,7 @@ ADD_CONFIG='{
 
 UPDATE_CONFIG=$(cat <<EOF
 {
-    "scan_speed": "slow", #sequential, slow, moderate, fast
+    "scan_speed": "$SCAN_SPEED",
     "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
     "default_scanning_profile_id": "$DEFAULT_SCANNING_PROFILE_ID"
 }
@@ -188,6 +194,7 @@ delete_all_targets() {
         curl --insecure -s -X DELETE "$SERVER/api/v1/targets/$target_id" -H "X-Auth: $API_KEY" > /dev/null
         deleted=$((deleted + 1))
         echo -e "\033[32m✓ Deleted $deleted/$total: $target_id\033[0m"
+        sleep 3
     done
     
     echo -e "\033[32mTotal deleted: $deleted targets.\033[0m"
@@ -262,6 +269,7 @@ resume_failed_scans() {
         wait_for_scan_slot
         start_scan "$target_id"
         echo -e "\033[32m✓ Resumed scan for target: $target_id\033[0m"
+        sleep 65
     done
     echo -e "\033[32mAll failed scans resumed.\033[0m"
 }
@@ -271,8 +279,20 @@ wait_for_completion() {
     local start_time=$(date +%s)
     
     while true; do
-        local scans=$(curl --insecure -s -X GET "$SERVER/api/v1/scans?l=100" -H "X-Auth: $API_KEY")
-        local active=$(echo "$scans" | jq '[.scans[] | select(.current_session.status == "processing" or .current_session.status == "scheduled")] | length')
+        local cursor=0
+        local active=0
+
+        while true; do
+            local response=$(curl --insecure -s -X GET "$SERVER/api/v1/scans?l=100&c=$cursor" -H "X-Auth: $API_KEY")
+            local batch_active=$(echo "$response" | jq '[.scans[] | select(.current_session.status == "processing" or .current_session.status == "scheduled")] | length')
+            active=$((active + batch_active))
+
+            local batch_count=$(echo "$response" | jq '.scans | length')
+            if [[ $batch_count -lt 100 ]]; then
+                break
+            fi
+            cursor=$((cursor + 100))
+        done
         
         if [[ $active -eq 0 ]]; then
             break
@@ -290,31 +310,57 @@ wait_for_completion() {
     echo -e "\033[32m\n=== SCAN SUMMARY ===\033[0m"
     echo -e "Total time: ${hours}h ${minutes}m"
     
-    local scans=$(curl --insecure -s -X GET "$SERVER/api/v1/scans?l=100" -H "X-Auth: $API_KEY")
-    local completed=$(echo "$scans" | jq '[.scans[] | select(.current_session.status == "completed")] | length')
-    local failed=$(echo "$scans" | jq '[.scans[] | select(.current_session.status == "failed")] | length')
-    local aborted=$(echo "$scans" | jq '[.scans[] | select(.current_session.status == "aborted")] | length')
-    
+    local completed=0
+    local failed=0
+    local aborted=0
+    local cursor=0
+    local all_scans_json='[]'
+
+    while true; do
+        local response=$(curl --insecure -s -X GET "$SERVER/api/v1/scans?l=100&c=$cursor" -H "X-Auth: $API_KEY")
+        completed=$((completed + $(echo "$response" | jq '[.scans[] | select(.current_session.status == "completed")] | length')))
+        failed=$((failed + $(echo "$response" | jq '[.scans[] | select(.current_session.status == "failed")] | length')))
+        aborted=$((aborted + $(echo "$response" | jq '[.scans[] | select(.current_session.status == "aborted")] | length')))
+        all_scans_json=$(echo "$all_scans_json $response" | jq -s '.[0] + [.[1].scans[] | select(.current_session.status == "completed")]')
+
+        local batch_count=$(echo "$response" | jq '.scans | length')
+        if [[ $batch_count -lt 100 ]]; then
+            break
+        fi
+        cursor=$((cursor + 100))
+    done
+
     echo -e "Completed: \033[32m$completed\033[0m"
     echo -e "Failed: \033[31m$failed\033[0m"
     echo -e "Aborted: \033[33m$aborted\033[0m"
-    
+
     echo -e "\n\033[34mVulnerabilities by target:\033[0m"
-    echo "$scans" | jq -r '.scans[] | select(.current_session.status == "completed") | "\(.target_id): \(.current_session.severity_counts.high // 0) high, \(.current_session.severity_counts.medium // 0) medium, \(.current_session.severity_counts.low // 0) low"' | while read line; do
+    echo "$all_scans_json" | jq -r '.[] | "\(.target_id): \(.current_session.severity_counts.high // 0) high, \(.current_session.severity_counts.medium // 0) medium, \(.current_session.severity_counts.low // 0) low"' | while read line; do
         echo -e "\033[36m  $line\033[0m"
     done
 }
 
 wait_for_scan_slot() {
     while true; do
-        local active
-        active=$(curl --insecure -s -X GET "$SERVER/api/v1/scans?l=100" \
-            -H "X-Auth: $API_KEY" | \
-            jq '[.scans[] | select(.current_session.status == "processing" or .current_session.status == "scheduled")] | length')
-        if [[ "$active" -lt "$MAX_CONCURRENT_SCANS" ]]; then
+        local cursor=0
+        local total_active=0
+
+        while true; do
+            local response=$(curl --insecure -s -X GET "$SERVER/api/v1/scans?l=100&c=$cursor" -H "X-Auth: $API_KEY")
+            local batch_active=$(echo "$response" | jq '[.scans[] | select(.current_session.status == "processing" or .current_session.status == "scheduled")] | length')
+            total_active=$((total_active + batch_active))
+
+            local batch_count=$(echo "$response" | jq '.scans | length')
+            if [[ $batch_count -lt 100 ]]; then
+                break
+            fi
+            cursor=$((cursor + 100))
+        done
+
+        if [[ "$total_active" -lt "$MAX_CONCURRENT_SCANS" ]]; then
             break
         fi
-        echo -e "\033[33mActive scans: $active / $MAX_CONCURRENT_SCANS — waiting 60s...\033[0m"
+        echo -e "\033[33mActive scans: $total_active / $MAX_CONCURRENT_SCANS — waiting 60s...\033[0m"
         sleep 60
     done
 }
@@ -390,6 +436,7 @@ while IFS=, read -r domain description; do
             all_target_ids+=($target_id)
             echo -e "\033[32m  ✓ Added with ID: $target_id\033[0m"
         fi
+        sleep 3
     fi
 done < "$DOMAIN_FILE"
 
@@ -397,6 +444,7 @@ for target_id in "${all_target_ids[@]}"; do
     echo -e "\033[34mConfiguring target: $target_id\033[0m"
     configure_target $target_id
     echo -e "\033[32mConfigured target: $target_id\033[0m"
+    sleep 5
 done
 
 if ! $SKIP_SCAN; then
@@ -411,6 +459,11 @@ if ! $SKIP_SCAN; then
             wait_for_scan_slot
             if start_scan $target_id; then
                 echo -e "\033[32m  ✓ Scan started\033[0m"
+            fi
+            
+            if [[ $current_scan -lt $total_scans ]]; then
+                echo -e "\033[33m  Waiting 65 seconds before next scan...\033[0m"
+                sleep 65
             fi
         done
         echo -e "\033[32mAll scans started.\033[0m"
