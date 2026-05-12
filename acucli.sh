@@ -465,11 +465,6 @@ if ! $SKIP_SCAN; then
             if start_scan $target_id; then
                 echo -e "\033[32m  ✓ Scan started\033[0m"
             fi
-            
-            if [[ $current_scan -lt $total_scans ]]; then
-                echo -e "\033[33m  Waiting 65 seconds before next scan...\033[0m"
-                sleep 65
-            fi
         done
         echo -e "\033[32mAll scans started.\033[0m"
         
